@@ -340,7 +340,7 @@ private:
     
     struct state_type
     {
-      enum value_t {ready, start, work, stop, stopped};
+      enum value_t {start, work, stop, stopped};
     };
   
     endpoint_type       remote_endpoint;
@@ -484,7 +484,7 @@ private:
 
   struct accept_state
   {
-    enum value_t {ready, in_progress, stopped};
+    enum value_t {work, stopped};
   };
   
   template <typename Handler>
@@ -598,6 +598,7 @@ private:
   intern_state::value_t intern_state_;
   accept_state::value_t accept_state_;
   std::size_t           pending_operations_;
+  std::size_t           pending_accept_;
 
   boost::asio::io_service&        io_service_;
   boost::asio::io_service&        session_io_service_;

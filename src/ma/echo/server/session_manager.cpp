@@ -6,6 +6,7 @@
 //
 
 #include <new>
+#include <utility>
 #include <boost/ref.hpp>
 #include <boost/assert.hpp>
 #include <boost/make_shared.hpp>
@@ -194,7 +195,7 @@ session_manager::session_wrapper::session_wrapper(
     boost::asio::io_service& io_service, const session_config& config)
   : session(boost::make_shared<server::session>(
         boost::ref(io_service), config))
-  , state(state_type::ready)
+  , state(state_type::work)
   , pending_operations(0)
 {
 }
@@ -202,7 +203,7 @@ session_manager::session_wrapper::session_wrapper(
 void session_manager::session_wrapper::reset()
 {      
   session->reset();
-  state = state_type::ready;
+  state = state_type::work;
   pending_operations = 0;
 }
 
@@ -217,8 +218,9 @@ session_manager::session_manager(boost::asio::io_service& io_service,
   , managed_session_config_(config.managed_session_config)
   , extern_state_(extern_state::ready)
   , intern_state_(intern_state::work)
-  , accept_state_(accept_state::ready)
+  , accept_state_(accept_state::work)
   , pending_operations_(0)
+  , pending_accept_(0)
   , io_service_(io_service)
   , session_io_service_(session_io_service)
   , strand_(io_service)
@@ -236,15 +238,19 @@ void session_manager::reset(bool free_recycled_sessions)
 {
   extern_state_ = extern_state::ready;
   intern_state_ = intern_state::work;
-  accept_state_ = accept_state::ready;  
-  pending_operations_ = 0;    
+  accept_state_ = accept_state::work;  
+  pending_operations_ = pending_accept_ = 0;
+
   close_acceptor();
+
   active_sessions_.clear();
   if (free_recycled_sessions)
   {
     recycled_sessions_.clear();
   }
+
   extern_wait_error_.clear();
+
   feel(available_accept_allocators_, accept_allocators_.get(), 
       max_pending_accept_);
 }
@@ -355,27 +361,73 @@ void session_manager::continue_work()
     return;
   }
 
-  if (accept_state::ready != accept_state_)
+  if (accept_state::stopped == accept_state_)
   {
-    // Can't start more accept operations - no ready acceptors
     return;
   }
 
   if (active_sessions_.size() >= max_session_count_)
-  {    
-    // Can't start more accept operations - no space
+  {
+    // Can't start more accept operations - no space for sessions    
+    // A small defense for acceptor
     if (acceptor_.is_open())
     {
       close_acceptor();
     }
-    return;
   }
 
+  if (pending_accept_ >= max_pending_accept_)
+  {
+    // Can't start more accept operations - 
+    // limit of pending accept opertaions reached
+    return;
+  }
+ 
   // Prepare (open) acceptor
   if (!acceptor_.is_open())
   {
     if (boost::system::error_code error = open_acceptor())
     {
+      if (!active_sessions_.empty())
+      {
+        // Try later
+        return;
+      }
+      accept_state_ = accept_state::stopped;
+      if (is_out_of_work())
+      {
+        start_stop(server_error::out_of_work);
+      }
+      return;
+    }    
+  }  
+
+  std::size_t allowed_accept = (std::min)(max_pending_accept_,
+      max_session_count_ - active_sessions_.size());
+  
+  if (pending_accept_ >= allowed_accept)
+  {
+    // We have enought pending accept operations
+    return;
+  }  
+
+  for (std::size_t accept_count = allowed_accept - pending_accept_; 
+      accept_count; --accept_count)
+  {
+    // Get new, ready to start session
+    boost::system::error_code error;
+    session_wrapper_ptr session = create_session(error);
+    if (error)
+    {
+      if (session)
+      {
+        recycle(session);
+      }
+      if (pending_accept_ || !active_sessions_.empty())
+      {
+        // Try later
+        return;
+      }
       accept_state_ = accept_state::stopped;
       if (is_out_of_work())
       {
@@ -383,38 +435,14 @@ void session_manager::continue_work()
       }
       return;
     }
+    start_accept_session(session);
   }
-
-  // Get new, ready to start session
-  boost::system::error_code error;
-  session_wrapper_ptr session = create_session(error);
-  if (error)
-  {
-    if (session)
-    {
-      recycle(session);
-    }
-    if (!active_sessions_.empty())
-    {
-      // Try later
-      return;
-    }  
-    accept_state_ = accept_state::stopped;
-    if (is_out_of_work())
-    {
-      start_stop(server_error::out_of_work);
-    }
-    return;
-  }
-
-  start_accept_session(session);
 }
 
 void session_manager::handle_accept(accept_allocator* handler_allocator, 
     const session_wrapper_ptr& session, const boost::system::error_code& error)
 {
-  BOOST_ASSERT_MSG(accept_state::in_progress == accept_state_,
-      "invalid accept state");
+  BOOST_ASSERT_MSG(pending_accept_, "invalid accept state");
 
   // Split handler based on current internal state 
   // that might change during accept operation
@@ -441,25 +469,16 @@ void session_manager::handle_accept_at_work(
   BOOST_ASSERT_MSG(intern_state::work == intern_state_, 
       "invalid internal state");
 
-  BOOST_ASSERT_MSG(accept_state::in_progress == accept_state_,
-      "invalid accept state");
+  BOOST_ASSERT_MSG(pending_accept_, "invalid accept state");
 
   // Unregister pending operation
   --pending_operations_;
-  accept_state_ = accept_state::ready;
+  --pending_accept_;
 
   // Mark handler_allocator as free
   available_accept_allocators_.push_front(handler_allocator);
     
-  if (error)
-  {
-    accept_state_ = accept_state::stopped;
-    recycle(session);
-    continue_work();
-    return;
-  }
-
-  if (active_sessions_.size() >= max_session_count_)
+  if (error || (active_sessions_.size() >= max_session_count_))
   {
     recycle(session);
     continue_work();
@@ -478,15 +497,17 @@ void session_manager::handle_accept_at_stop(
   BOOST_ASSERT_MSG(intern_state::stop == intern_state_, 
       "invalid internal state");
 
-  BOOST_ASSERT_MSG(accept_state::in_progress == accept_state_,
-      "invalid accept state");
+  BOOST_ASSERT_MSG(pending_accept_, "invalid accept state");
   
   // Unregister pending operation
   --pending_operations_;
-  accept_state_ = accept_state::stopped;
+  --pending_accept_;
+
+  // Stop accept activity
+  accept_state_ = accept_state::stopped;  
 
   // Mark handler_allocator as free
-  available_accept_allocators_.push_front(handler_allocator);
+  available_accept_allocators_.push_front(handler_allocator);  
   
   recycle(session);
   continue_stop();  
@@ -755,7 +776,7 @@ void session_manager::start_stop(const boost::system::error_code& error)
   }  
 
   // Switch all internal SMs to the right states
-  if (accept_state::ready == accept_state_)
+  if (!pending_accept_ && (accept_state::work == accept_state_))
   {
     accept_state_ = accept_state::stopped;
   }
@@ -778,6 +799,8 @@ void session_manager::continue_stop()
   {
     BOOST_ASSERT_MSG(accept_state::stopped  == accept_state_,
       "invalid accept state");
+
+    BOOST_ASSERT_MSG(pending_accept_, "invalid accept state");
 
     BOOST_ASSERT_MSG(active_sessions_.empty(),
       "there are still some active sessions");
@@ -819,7 +842,7 @@ void session_manager::start_accept_session(const session_wrapper_ptr& session)
   available_accept_allocators_.pop_front();
 
   // Register pending operation
-  accept_state_ = accept_state::in_progress;
+  ++pending_accept_;
   ++pending_operations_;
 }
 
