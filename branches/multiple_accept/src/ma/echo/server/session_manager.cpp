@@ -35,15 +35,17 @@ private:
 
 public:
   typedef void result_type;
+  typedef session_manager::accept_allocator    allocator_type;
+  typedef session_manager::session_wrapper_ptr session_ptr;
 
   typedef void (session_manager::*func_type)(
-      const session_manager::session_wrapper_ptr&,
-      const boost::system::error_code&);
+      allocator_type*, const session_ptr&, const boost::system::error_code&);
 
   template <typename SessionManagerPtr, typename SessionWrapperPtr>
   accept_handler_binder(func_type func, SessionManagerPtr&& session_manager,
-      SessionWrapperPtr&& session)
+      allocator_type* handler_allocator, SessionWrapperPtr&& session)
     : func_(func)
+    , handler_allocator_(handler_allocator)
     , session_manager_(std::forward<SessionManagerPtr>(session_manager))
     , session_(std::forward<SessionWrapperPtr>(session))
   {
@@ -53,6 +55,7 @@ public:
 
   accept_handler_binder(this_type&& other)
     : func_(other.func_)
+    , handler_allocator_(other.handler_allocator_)
     , session_manager_(std::move(other.session_manager_))
     , session_(std::move(other.session_))
   {
@@ -60,6 +63,7 @@ public:
 
   accept_handler_binder(const this_type& other)
     : func_(other.func_)
+    , handler_allocator_(other.handler_allocator_)
     , session_manager_(other.session_manager_)
     , session_(other.session_)
   {
@@ -69,13 +73,14 @@ public:
 
   void operator()(const boost::system::error_code& error)
   {
-    ((*session_manager_).*func_)(session_, error);
+    ((*session_manager_).*func_)(handler_allocator_, session_, error);
   }
 
 private:
-  func_type func_;
+  func_type           func_;
+  allocator_type*     handler_allocator_;
   session_manager_ptr session_manager_;
-  session_manager::session_wrapper_ptr session_;
+  session_ptr         session_;
 }; // class session_manager::accept_handler_binder
 
 class session_manager::session_dispatch_binder
@@ -85,10 +90,10 @@ private:
 
 public:
   typedef void result_type;
+  typedef session_manager::session_wrapper_ptr session_ptr;
 
   typedef void (*func_type)(const session_manager_weak_ptr&,
-    const session_manager::session_wrapper_ptr&, 
-    const boost::system::error_code&);
+    const session_ptr&, const boost::system::error_code&);
 
   template <typename SessionManagerPtr, typename SessionWrapperPtr>
   session_dispatch_binder(func_type func, SessionManagerPtr&& session_manager,
@@ -123,9 +128,9 @@ public:
   }
 
 private:
-  func_type func_;
+  func_type                func_;
   session_manager_weak_ptr session_manager_;
-  session_manager::session_wrapper_ptr session_;
+  session_ptr              session_;
 }; // class session_manager::session_dispatch_binder      
 
 class session_manager::session_handler_binder
@@ -135,10 +140,10 @@ private:
 
 public:
   typedef void result_type;
+  typedef session_manager::session_wrapper_ptr session_ptr;
 
   typedef void (session_manager::*func_type)(
-      const session_manager::session_wrapper_ptr&,
-      const boost::system::error_code&);
+      const session_ptr&, const boost::system::error_code&);
 
   template <typename SessionManagerPtr, typename SessionWrapperPtr>
   session_handler_binder(func_type func, SessionManagerPtr&& session_manager,
@@ -176,9 +181,9 @@ public:
   }
 
 private:
-  func_type func_;
-  session_manager_ptr session_manager_;
-  session_manager::session_wrapper_ptr session_;
+  func_type                 func_;
+  session_manager_ptr       session_manager_;
+  session_ptr               session_;
   boost::system::error_code error_;
 }; // class session_manager::session_handler_binder
 
@@ -206,6 +211,7 @@ session_manager::session_manager(boost::asio::io_service& io_service,
     const session_manager_config& config)
   : accepting_endpoint_(config.accepting_endpoint)
   , listen_backlog_(config.listen_backlog)
+  , max_pending_accept_count_(config.max_pending_accept_count)
   , max_session_count_(config.max_session_count)
   , recycled_session_count_(config.recycled_session_count)
   , managed_session_config_(config.managed_session_config)
@@ -219,7 +225,11 @@ session_manager::session_manager(boost::asio::io_service& io_service,
   , acceptor_(io_service)        
   , extern_wait_handler_(io_service)
   , extern_stop_handler_(io_service)        
-{          
+  , accept_allocators_(new accept_allocator[config.max_pending_accept_count])
+  , available_accept_allocators_(config.max_pending_accept_count)
+{
+  feel(available_accept_allocators_, accept_allocators_.get(), 
+      max_pending_accept_count_);
 }
 
 void session_manager::reset(bool free_recycled_sessions)
@@ -227,17 +237,16 @@ void session_manager::reset(bool free_recycled_sessions)
   extern_state_ = extern_state::ready;
   intern_state_ = intern_state::work;
   accept_state_ = accept_state::ready;  
-  pending_operations_ = 0;  
-  
+  pending_operations_ = 0;    
   close_acceptor();
-
   active_sessions_.clear();
   if (free_recycled_sessions)
   {
     recycled_sessions_.clear();
   }
-
   extern_wait_error_.clear();
+  feel(available_accept_allocators_, accept_allocators_.get(), 
+      max_pending_accept_count_);
 }
 
 boost::system::error_code session_manager::do_start_extern_start()
@@ -401,8 +410,8 @@ void session_manager::continue_work()
   start_accept_session(session);
 }
 
-void session_manager::handle_accept(const session_wrapper_ptr& session,
-    const boost::system::error_code& error)
+void session_manager::handle_accept(accept_allocator* handler_allocator, 
+    const session_wrapper_ptr& session, const boost::system::error_code& error)
 {
   BOOST_ASSERT_MSG(accept_state::in_progress == accept_state_,
       "invalid accept state");
@@ -412,11 +421,11 @@ void session_manager::handle_accept(const session_wrapper_ptr& session,
   switch (intern_state_)
   {
   case intern_state::work:
-    handle_accept_at_work(session, error);
+    handle_accept_at_work(handler_allocator, session, error);
     break;  
 
   case intern_state::stop:
-    handle_accept_at_stop(session, error);
+    handle_accept_at_stop(handler_allocator, session, error);
     break;
 
   default:
@@ -425,7 +434,8 @@ void session_manager::handle_accept(const session_wrapper_ptr& session,
   }
 }
 
-void session_manager::handle_accept_at_work(const session_wrapper_ptr& session,
+void session_manager::handle_accept_at_work(
+    accept_allocator* handler_allocator, const session_wrapper_ptr& session,
     const boost::system::error_code& error)
 {
   BOOST_ASSERT_MSG(intern_state::work == intern_state_, 
@@ -437,6 +447,9 @@ void session_manager::handle_accept_at_work(const session_wrapper_ptr& session,
   // Unregister pending operation
   --pending_operations_;
   accept_state_ = accept_state::ready;
+
+  // Mark handler_allocator as free
+  available_accept_allocators_.push_front(handler_allocator);
     
   if (error)
   {
@@ -458,7 +471,8 @@ void session_manager::handle_accept_at_work(const session_wrapper_ptr& session,
   continue_work();
 }
 
-void session_manager::handle_accept_at_stop(const session_wrapper_ptr& session,
+void session_manager::handle_accept_at_stop(
+    accept_allocator* handler_allocator, const session_wrapper_ptr& session,
     const boost::system::error_code& /*error*/)
 {
   BOOST_ASSERT_MSG(intern_state::stop == intern_state_, 
@@ -467,8 +481,12 @@ void session_manager::handle_accept_at_stop(const session_wrapper_ptr& session,
   BOOST_ASSERT_MSG(accept_state::in_progress == accept_state_,
       "invalid accept state");
   
+  // Unregister pending operation
   --pending_operations_;
   accept_state_ = accept_state::stopped;
+
+  // Mark handler_allocator as free
+  available_accept_allocators_.push_front(handler_allocator);
   
   recycle(session);
   continue_stop();  
@@ -778,23 +796,29 @@ void session_manager::continue_stop()
 
 void session_manager::start_accept_session(const session_wrapper_ptr& session)
 {
+  accept_allocator* handler_allocator = available_accept_allocators_.front();
+  
 #if defined(MA_HAS_RVALUE_REFS) \
     && defined(MA_BOOST_BIND_HAS_NO_MOVE_CONTRUCTOR)
 
   acceptor_.async_accept(session->session->socket(), session->remote_endpoint,
-      MA_STRAND_WRAP(strand_, make_custom_alloc_handler(accept_allocator_, 
+      MA_STRAND_WRAP(strand_, make_custom_alloc_handler(*handler_allocator, 
           accept_handler_binder(&this_type::handle_accept, shared_from_this(),
-              session))));
+              handler_allocator, session))));
 
 #else
 
   acceptor_.async_accept(session->session->socket(), session->remote_endpoint,
-      MA_STRAND_WRAP(strand_, make_custom_alloc_handler(accept_allocator_, 
-          boost::bind(&this_type::handle_accept, shared_from_this(), session, 
-              boost::asio::placeholders::error))));
+      MA_STRAND_WRAP(strand_, make_custom_alloc_handler(*handler_allocator, 
+          boost::bind(&this_type::handle_accept, shared_from_this(), 
+              handler_allocator, session, boost::asio::placeholders::error))));
 
 #endif
 
+  // Mark used handler allocator as non free
+  available_accept_allocators_.pop_front();
+
+  // Register pending operation
   accept_state_ = accept_state::in_progress;
   ++pending_operations_;
 }
@@ -1066,6 +1090,16 @@ void session_manager::open(protocol_type::acceptor& acceptor,
   if (!error)
   {
     closing_guard.release();
+  }
+}
+
+void session_manager::feel(
+    boost::circular_buffer<accept_allocator*>& available_allocators,
+    accept_allocator* allocator, std::size_t allocator_count)
+{
+  for (; allocator_count; ++allocator, --allocator_count)
+  {
+    available_allocators.push_back(allocator);
   }
 }
 

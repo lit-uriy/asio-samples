@@ -19,6 +19,8 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/noncopyable.hpp>
 #include <boost/tuple/tuple.hpp>
+#include <boost/scoped_array.hpp>
+#include <boost/circular_buffer.hpp>
 #include <boost/enable_shared_from_this.hpp>
 #include <ma/config.hpp>
 #include <ma/handler_storage.hpp>
@@ -413,6 +415,7 @@ private:
   }; // struct session_wrapper
 
   typedef detail::sp_intrusive_list<session_wrapper> session_list;
+  typedef in_place_handler_allocator<512> accept_allocator;
   
 #if defined(MA_HAS_RVALUE_REFS) \
     && defined(MA_BOOST_BIND_HAS_NO_MOVE_CONTRUCTOR)
@@ -527,11 +530,11 @@ private:
 
   void continue_work();  
 
-  void handle_accept(const session_wrapper_ptr&, 
+  void handle_accept(accept_allocator*, const session_wrapper_ptr&,
       const boost::system::error_code&);
-  void handle_accept_at_work(const session_wrapper_ptr&, 
+  void handle_accept_at_work(accept_allocator*, const session_wrapper_ptr&,
       const boost::system::error_code&);
-  void handle_accept_at_stop(const session_wrapper_ptr&, 
+  void handle_accept_at_stop(accept_allocator*, const session_wrapper_ptr&,
       const boost::system::error_code&);
 
   void handle_session_start(const session_wrapper_ptr&,
@@ -579,10 +582,14 @@ private:
 
   static void open(protocol_type::acceptor& acceptor, 
       const protocol_type::endpoint& endpoint, int backlog, 
-      boost::system::error_code& error);  
+      boost::system::error_code& error);
+
+  static void feel(boost::circular_buffer<accept_allocator*>&, 
+      accept_allocator*, std::size_t count);
 
   const protocol_type::endpoint accepting_endpoint_;
   const int                     listen_backlog_;
+  const std::size_t             max_pending_accept_count_;
   const std::size_t             max_session_count_;
   const std::size_t             recycled_session_count_;
   const session_config          managed_session_config_;
@@ -602,8 +609,9 @@ private:
 
   handler_storage<boost::system::error_code> extern_wait_handler_;
   handler_storage<boost::system::error_code> extern_stop_handler_;
-                
-  in_place_handler_allocator<512> accept_allocator_;
+  
+  boost::scoped_array<accept_allocator>     accept_allocators_;
+  boost::circular_buffer<accept_allocator*> available_accept_allocators_;
 }; // class session_manager
 
 } // namespace server
