@@ -211,7 +211,7 @@ session_manager::session_manager(boost::asio::io_service& io_service,
     const session_manager_config& config)
   : accepting_endpoint_(config.accepting_endpoint)
   , listen_backlog_(config.listen_backlog)
-  , max_pending_accept_count_(config.max_pending_accept_count)
+  , max_pending_accept_(config.max_pending_accept)
   , max_session_count_(config.max_session_count)
   , recycled_session_count_(config.recycled_session_count)
   , managed_session_config_(config.managed_session_config)
@@ -225,11 +225,11 @@ session_manager::session_manager(boost::asio::io_service& io_service,
   , acceptor_(io_service)        
   , extern_wait_handler_(io_service)
   , extern_stop_handler_(io_service)        
-  , accept_allocators_(new accept_allocator[config.max_pending_accept_count])
-  , available_accept_allocators_(config.max_pending_accept_count)
+  , accept_allocators_(new accept_allocator[config.max_pending_accept])
+  , available_accept_allocators_(config.max_pending_accept)
 {
   feel(available_accept_allocators_, accept_allocators_.get(), 
-      max_pending_accept_count_);
+      config.max_pending_accept);
 }
 
 void session_manager::reset(bool free_recycled_sessions)
@@ -246,7 +246,7 @@ void session_manager::reset(bool free_recycled_sessions)
   }
   extern_wait_error_.clear();
   feel(available_accept_allocators_, accept_allocators_.get(), 
-      max_pending_accept_count_);
+      max_pending_accept_);
 }
 
 boost::system::error_code session_manager::do_start_extern_start()
