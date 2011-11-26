@@ -589,7 +589,7 @@ private:
 
   const protocol_type::endpoint accepting_endpoint_;
   const int                     listen_backlog_;
-  const std::size_t             max_pending_accept_count_;
+  const std::size_t             max_pending_accept_;
   const std::size_t             max_session_count_;
   const std::size_t             recycled_session_count_;
   const session_config          managed_session_config_;
@@ -597,7 +597,7 @@ private:
   extern_state::value_t extern_state_;
   intern_state::value_t intern_state_;
   accept_state::value_t accept_state_;
-  std::size_t           pending_operations_;  
+  std::size_t           pending_operations_;
 
   boost::asio::io_service&        io_service_;
   boost::asio::io_service&        session_io_service_;
