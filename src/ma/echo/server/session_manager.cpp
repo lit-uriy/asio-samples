@@ -374,12 +374,13 @@ void session_manager::continue_work()
     {
       close_acceptor();
     }
+    return;
   }
 
   if (pending_accept_ >= max_pending_accept_)
   {
     // Can't start more accept operations - 
-    // limit of pending accept opertaions reached
+    // limit of pending accept operations is reached
     return;
   }
  
@@ -425,7 +426,7 @@ void session_manager::continue_work()
       }
       if (pending_accept_ || !active_sessions_.empty())
       {
-        // Try later
+        // Try start accept new session later
         return;
       }
       accept_state_ = accept_state::stopped;

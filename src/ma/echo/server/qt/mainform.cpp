@@ -127,6 +127,8 @@ MainForm::MainForm(Service& service, QWidget* parent, Qt::WFlags flags)
   optionsWidgets_.push_back(
       boost::make_tuple(1, ui_.listenBacklogSpinBox));
   optionsWidgets_.push_back(
+      boost::make_tuple(1, ui_.maxPendingAcceptSpinBox));
+  optionsWidgets_.push_back(
       boost::make_tuple(1, ui_.portNumberSpinBox));
   optionsWidgets_.push_back(
       boost::make_tuple(1, ui_.addressEdit));
@@ -333,35 +335,58 @@ execution_config MainForm::buildExecutionConfig() const
 session_config MainForm::buildSessionConfig() const
 {
   session_config::optional_time_duration inactivityTimeout;
-  if (boost::optional<int> timeoutSeconds = readOptionalValue(
-      *ui_.inactivityTimeoutCheckBox, *ui_.inactivityTimeoutSpinBox))
-  {
-    inactivityTimeout = 
-        boost::posix_time::seconds(boost::numeric_cast<long>(*timeoutSeconds));
-  }    
-
-  boost::optional<int> socketRecvBufferSize = readOptionalValue(
-      *ui_.sockRecvBufferSizeCheckBox, *ui_.sockRecvBufferSizeSpinBox);
-
-  boost::optional<int> socketSendBufferSize = readOptionalValue(
-      *ui_.sockSendBufferSizeCheckBox, *ui_.sockSendBufferSizeSpinBox);
-
+  boost::optional<int>  socketRecvBufferSize;
+  boost::optional<int>  socketSendBufferSize;
   boost::optional<bool> tcpNoDelay;
-  switch (ui_.tcpNoDelayComboBox->currentIndex())
+  std::size_t           sessionBufferSize;
+  std::size_t           maxTransferSize;
+  QWidget*              currentWidget = 0;
+  try
   {
-  case 1:
-    tcpNoDelay = true;
-    break;
-  case 2:
-    tcpNoDelay = false;
-    break;
-  }  
+    currentWidget = ui_.inactivityTimeoutSpinBox;
+    if (boost::optional<int> timeoutSeconds = readOptionalValue(
+        *ui_.inactivityTimeoutCheckBox, *ui_.inactivityTimeoutSpinBox))
+    {
+      inactivityTimeout = boost::posix_time::seconds(
+          boost::numeric_cast<long>(*timeoutSeconds));
+    }    
 
-  return session_config(
-      boost::numeric_cast<std::size_t>(ui_.sessionBufferSizeSpinBox->value()),
-      boost::numeric_cast<std::size_t>(ui_.maxTransferSizeSpinBox->value()),
-      socketRecvBufferSize, socketSendBufferSize, 
-      tcpNoDelay, inactivityTimeout);
+    currentWidget = ui_.sockRecvBufferSizeSpinBox;
+    socketRecvBufferSize = readOptionalValue(
+        *ui_.sockRecvBufferSizeCheckBox, *ui_.sockRecvBufferSizeSpinBox);
+
+    currentWidget = ui_.sockSendBufferSizeSpinBox;
+    socketSendBufferSize = readOptionalValue(
+        *ui_.sockSendBufferSizeCheckBox, *ui_.sockSendBufferSizeSpinBox);
+
+    currentWidget = ui_.tcpNoDelayComboBox;
+    switch (ui_.tcpNoDelayComboBox->currentIndex())
+    {
+    case 1:
+      tcpNoDelay = true;
+      break;
+    case 2:
+      tcpNoDelay = false;
+      break;
+    }
+
+    currentWidget = ui_.sessionBufferSizeSpinBox;
+    sessionBufferSize = boost::numeric_cast<std::size_t>(
+        ui_.sessionBufferSizeSpinBox->value());
+
+    currentWidget = ui_.maxTransferSizeSpinBox;
+    maxTransferSize = boost::numeric_cast<std::size_t>(
+        ui_.maxTransferSizeSpinBox->value());
+  }
+  catch (const boost::numeric::bad_numeric_cast&)
+  {
+    boost::throw_exception(widget_option_read_error(
+      currentWidget, tr("Invalid value.")));
+  }
+
+  return session_config(sessionBufferSize, maxTransferSize, 
+      socketRecvBufferSize, socketSendBufferSize, tcpNoDelay, 
+      inactivityTimeout);
 }
 
 session_manager_config MainForm::buildSessionManagerConfig() const
@@ -370,6 +395,7 @@ session_manager_config MainForm::buildSessionManagerConfig() const
   std::size_t    maxSessions;
   std::size_t    recycledSessions;
   int            listenBacklog;
+  std::size_t    maxPendingAccept;
   QWidget*       currentWidget = 0;
   try 
   {
@@ -386,6 +412,10 @@ session_manager_config MainForm::buildSessionManagerConfig() const
 
     currentWidget = ui_.listenBacklogSpinBox;
     listenBacklog = ui_.listenBacklogSpinBox->value();
+
+    currentWidget = ui_.maxPendingAcceptSpinBox;
+    maxPendingAccept = boost::numeric_cast<std::size_t>(
+        ui_.maxPendingAcceptSpinBox->value());    
   }
   catch (const boost::numeric::bad_numeric_cast&)
   {
@@ -407,7 +437,8 @@ session_manager_config MainForm::buildSessionManagerConfig() const
 
   return session_manager_config(
       boost::asio::ip::tcp::endpoint(listenAddress, port), 
-      maxSessions, recycledSessions, listenBacklog, buildSessionConfig());
+      maxSessions, recycledSessions, listenBacklog, maxPendingAccept, 
+      buildSessionConfig());
 }  
 
 MainForm::ServiceConfig MainForm::buildServiceConfig() const
