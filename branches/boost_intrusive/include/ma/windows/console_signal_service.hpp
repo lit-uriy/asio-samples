@@ -23,11 +23,12 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/system/error_code.hpp>
+#include <boost/intrusive/list.hpp>
+#include <boost/intrusive/slist.hpp>
 #include <ma/type_traits.hpp>
 #include <ma/bind_handler.hpp>
 #include <ma/detail/handler_ptr.hpp>
 #include <ma/detail/service_base.hpp>
-#include <ma/detail/intrusive_list.hpp>
 
 #if defined(MA_HAS_RVALUE_REFS)
 #include <utility>
@@ -37,7 +38,8 @@ namespace ma {
 namespace windows {
 
 class console_signal_service_base 
-  : public detail::intrusive_list<console_signal_service_base>::base_hook
+  : public boost::intrusive::list_base_hook<
+        boost::intrusive::link_mode<boost::intrusive::normal_link> >
 {
 private:
   typedef console_signal_service_base this_type;
@@ -72,13 +74,15 @@ class console_signal_service
   : public detail::service_base<console_signal_service>
   , private console_signal_service_base
 {
-private:  
-  class handler_base 
-    : public detail::intrusive_forward_list<handler_base>::base_hook
+private:
+  typedef boost::intrusive::slist_base_hook<
+      boost::intrusive::link_mode<boost::intrusive::normal_link> > slist_hook;
+
+  class handler_base : public slist_hook
   {
   private:
     typedef handler_base this_type;
-    typedef detail::intrusive_forward_list<handler_base>::base_hook base_type;
+    typedef slist_hook   base_type;
 
   public:
 
@@ -103,7 +107,8 @@ private:
 #else
 
     typedef void (*destroy_func_type)(this_type*);
-    typedef void (*post_func_type)(this_type*, const boost::system::error_code&);
+    typedef void (*post_func_type)(
+        this_type*, const boost::system::error_code&);
 
     handler_base(destroy_func_type, post_func_type);
 
@@ -121,12 +126,18 @@ private:
 #endif
   }; // class handler_base
 
-  typedef detail::intrusive_forward_list<handler_base> handler_list;
+  typedef boost::intrusive::slist<handler_base, 
+      boost::intrusive::constant_time_size<false>,
+      boost::intrusive::linear<true>,
+      boost::intrusive::cache_last<true> > handler_list;
 
+  typedef boost::intrusive::list_base_hook<
+      boost::intrusive::link_mode<boost::intrusive::normal_link> > list_hook;
+  
   // Base class for implementation that helps to hide
   // public inheritance from detail::intrusive_list::base_hook
   class impl_base
-    : public detail::intrusive_list<impl_base>::base_hook
+    : public list_hook
     , private boost::noncopyable
   {
   public:
@@ -172,7 +183,8 @@ private:
 
   typedef boost::mutex                      mutex_type;
   typedef boost::lock_guard<mutex_type>     lock_guard;
-  typedef detail::intrusive_list<impl_base> impl_base_list;  
+  typedef boost::intrusive::list<impl_base, 
+      boost::intrusive::constant_time_size<false> > impl_base_list;
 
   virtual void shutdown_service();
   virtual bool deliver_signal();

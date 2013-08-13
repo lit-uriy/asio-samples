@@ -21,12 +21,13 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/throw_exception.hpp>
+#include <boost/intrusive/list.hpp>
+#include <boost/intrusive/slist.hpp>
 #include <ma/config.hpp>
 #include <ma/type_traits.hpp>
 #include <ma/bind_handler.hpp>
 #include <ma/detail/handler_ptr.hpp>
 #include <ma/detail/service_base.hpp>
-#include <ma/detail/intrusive_list.hpp>
 
 #if defined(MA_HAS_RVALUE_REFS)
 #include <utility>
@@ -50,10 +51,16 @@ private:
   // Base class to hold up any value.
   class stored_base;
 
+  typedef boost::intrusive::list_base_hook<
+      boost::intrusive::link_mode<boost::intrusive::normal_link> > list_hook;
+
+  typedef boost::intrusive::slist_base_hook<
+      boost::intrusive::link_mode<boost::intrusive::normal_link> > slist_hook;
+
   // Base class for implementation that helps to hide
   // public inheritance from detail::intrusive_list::base_hook
   class impl_base
-    : public detail::intrusive_list<impl_base>::base_hook
+    : public list_hook
     , private boost::noncopyable
   {
   public:
@@ -68,7 +75,7 @@ private:
     // Pointer to the stored handler otherwise null pointer.
     stored_base* handler_;
   }; // class impl_base
-
+  
 public:
   class implementation_type : private impl_base
   {
@@ -120,7 +127,8 @@ private:
 
   typedef boost::mutex                      mutex_type;
   typedef boost::lock_guard<mutex_type>     lock_guard;
-  typedef detail::intrusive_list<impl_base> impl_base_list;
+  typedef boost::intrusive::list<impl_base, 
+      boost::intrusive::constant_time_size<false> > impl_base_list;
 
   virtual void shutdown_service();
 
@@ -137,12 +145,11 @@ inline bad_handler_call::bad_handler_call()
 {
 }
 
-class handler_storage_service::stored_base
-  : public detail::intrusive_forward_list<stored_base>::base_hook
+class handler_storage_service::stored_base : public slist_hook
 {
 private:
   typedef stored_base this_type;
-  typedef detail::intrusive_forward_list<stored_base>::base_hook base_type;
+  typedef slist_hook base_type;
 
 public:
 
@@ -904,7 +911,7 @@ inline void handler_storage_service::destroy(implementation_type& impl)
   // Remove implementation from the list of active implementations.
   {
     lock_guard impl_list_lock(impl_list_mutex_);
-    impl_list_.erase(impl);
+    impl_list_.erase(impl_list_.s_iterator_to(impl));
   }
 
   // Destroy stored handler if it exists.
@@ -1028,25 +1035,30 @@ inline void handler_storage_service::shutdown_service()
   // Restrict usage of service.
   shutdown_ = true;
   // Take ownership of all still active handlers.
-  detail::intrusive_forward_list<stored_base> handlers;
+  typedef boost::intrusive::slist<stored_base, 
+      boost::intrusive::constant_time_size<false>,
+      boost::intrusive::linear<true>,
+      boost::intrusive::cache_last<true> > stored_base_list;
+  stored_base_list handlers;
   {
     lock_guard impl_list_lock(impl_list_mutex_);
-    for (impl_base* impl = impl_list_.front(); impl;
-        impl = impl_list_.next(*impl))
+    for (impl_base_list::iterator i = impl_list_.begin(), e = impl_list_.end();
+        i != e; ++i)
     {
-      if (stored_base* handler = impl->handler_)
+      if (stored_base* handler = i->handler_)
       {
         handlers.push_front(*handler);
-        impl->handler_ = 0;
+        i->handler_ = 0;
       }
     }
   }
   // Destroy all handlers
-  for (stored_base* handler = handlers.front(); handler; )
+  for (stored_base_list::iterator i = handlers.begin(), e = handlers.end();
+      i != e;)
   {
-    stored_base* next_handler = handlers.next(*handler);
-    handler->destroy();
-    handler = next_handler;
+    stored_base& handler = *i;
+    ++i;
+    handler.destroy();
   }
 }
 

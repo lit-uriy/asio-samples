@@ -358,9 +358,6 @@
     <ClInclude Include="..\..\..\include\ma\detail\service_base.hpp">
       <Filter>Header Files\ma\detail</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\ma\detail\intrusive_list.hpp">
-      <Filter>Header Files\ma\detail</Filter>
-    </ClInclude>
     <ClInclude Include="GeneratedFiles\x64\ui_mainform.h">
       <Filter>Generated Files\x64</Filter>
     </ClInclude>

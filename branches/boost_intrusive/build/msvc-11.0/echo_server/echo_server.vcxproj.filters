@@ -149,9 +149,6 @@
     <ClInclude Include="..\..\..\include\ma\detail\service_base.hpp">
       <Filter>Header Files\ma\detail</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\ma\detail\intrusive_list.hpp">
-      <Filter>Header Files\ma\detail</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\..\include\ma\windows\console_signal.hpp">
       <Filter>Header Files\ma\windows</Filter>
     </ClInclude>
