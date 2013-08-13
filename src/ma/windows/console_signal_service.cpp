@@ -50,7 +50,8 @@ private:
 
   typedef boost::mutex                  mutex_type;
   typedef boost::lock_guard<mutex_type> lock_guard;
-  typedef detail::intrusive_list<console_signal_service_base> subscriber_list;
+  typedef boost::intrusive::list<console_signal_service_base, 
+      boost::intrusive::constant_time_size<false> > subscriber_list;
 
   static system_service_ptr get_nullable_instance();
   static BOOL WINAPI windows_ctrl_handler(DWORD);
@@ -120,7 +121,7 @@ void console_signal_service_base::system_service::remove_subscriber(
     console_signal_service_base& subscriber)
 {
   lock_guard services_guard(subscribers_mutex_);
-  subscribers_.erase(subscriber);
+  subscribers_.erase(subscribers_.s_iterator_to(subscriber));
 }
 
 console_signal_service_base::system_service::system_service(
@@ -166,10 +167,10 @@ bool console_signal_service_base::system_service::deliver_signal()
 {
   bool handled = false;
   lock_guard services_guard(subscribers_mutex_);
-  for (console_signal_service_base* subscriber = subscribers_.front(); 
-      subscriber; subscriber = subscribers_.next(*subscriber))
+  for (subscriber_list::iterator i = subscribers_.begin(), 
+      e = subscribers_.end(); i != e; ++i)
   {
-    handled |= subscriber->deliver_signal();
+    handled |= i->deliver_signal();
   }
   return handled;
 }
@@ -237,11 +238,11 @@ console_signal_service::impl_base::~impl_base()
 
 console_signal_service::handler_list_guard::~handler_list_guard()
 {
-  for (handler_base* handler = value.front(); handler; )
+  for (handler_list::iterator i = value.begin(), e = value.end(); i != e; )
   {
-    handler_base* next = value.next(*handler);
-    handler->destroy();
-    handler = next;
+    handler_base& handler = *i;
+    ++i;
+    handler.destroy();
   }
 }
 
@@ -267,10 +268,11 @@ console_signal_service::post_adapter::post_adapter(this_type&& other)
 
 void console_signal_service::post_adapter::operator()()
 {
-  while (handler_base* handler = handlers_->value.front())
+  while (!handlers_->value.empty())
   {
+    handler_base& handler = handlers_->value.front(); 
     handlers_->value.pop_front();
-    handler->post(boost::system::error_code());
+    handler.post(boost::system::error_code());
   }
 }
 
@@ -312,15 +314,16 @@ void console_signal_service::destroy(implementation_type& impl)
       handlers.value.swap(impl.handlers_);
 #endif
       // Remove implementation from the list of active implementations.
-      impl_list_.erase(impl);
+      impl_list_.erase(impl_list_.s_iterator_to(impl));
     }
   }
   // Cancel all waiting handlers.
-  while (handler_base* handler = handlers.value.front())
+  while (!handlers.value.empty())
   {
+    handler_base& handler = handlers.value.front(); 
     handlers.value.pop_front();
-    handler->post(boost::asio::error::operation_aborted);
-  }  
+    handler.post(boost::asio::error::operation_aborted);
+  }
 }
 
 std::size_t console_signal_service::cancel(implementation_type& impl,
@@ -341,12 +344,14 @@ std::size_t console_signal_service::cancel(implementation_type& impl,
   }
   // Post all handlers to signal operation was aborted
   std::size_t handler_count = 0;
-  while (handler_base* handler = handlers.value.front())
+  // Cancel all waiting handlers.
+  while (!handlers.value.empty())
   {
+    handler_base& handler = handlers.value.front(); 
     handlers.value.pop_front();
-    handler->post(boost::asio::error::operation_aborted);
+    handler.post(boost::asio::error::operation_aborted);
     ++handler_count;
-  }
+  }  
   error = boost::system::error_code();
   return handler_count;
 }
@@ -359,10 +364,10 @@ void console_signal_service::shutdown_service()
     // Restrict usage of service.
     shutdown_ = true;  
     // Take ownership of all still active handlers.
-    for (impl_base* impl = impl_list_.front(); impl;
-        impl = impl_list_.next(*impl))
+    for (impl_base_list::iterator i = impl_list_.begin(), e = impl_list_.end();
+        i != e; ++i)
     {
-      handlers.value.insert_front(impl->handlers_);
+      handlers.value.splice_after(handlers.value.before_begin(), i->handlers_);
     }
   }
 }
@@ -379,10 +384,11 @@ bool console_signal_service::deliver_signal()
   if (!shutdown_)
   {
     // Take ownership of all still active handlers.
-    for (impl_base* impl = impl_list_.front(); impl;
-        impl = impl_list_.next(*impl))
-    {      
-      handlers->value.insert_front(impl->handlers_);
+    for (impl_base_list::iterator i = impl_list_.begin(), e = impl_list_.end();
+        i != e; ++i)
+    {
+      handlers->value.splice_after(
+          handlers->value.before_begin(), i->handlers_);
     }
     if (handlers->value.empty())
     {
