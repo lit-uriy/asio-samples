@@ -17,6 +17,7 @@
 #include <boost/throw_exception.hpp>
 #include <boost/system/error_code.hpp>
 #include <boost/system/system_error.hpp>
+#include <boost/utility/addressof.hpp>
 #include <ma/config.hpp>
 #include <ma/shared_ptr_factory.hpp>
 #include <ma/detail/sp_singleton.hpp>
@@ -48,17 +49,20 @@ protected:
 private:
   struct factory;
 
-  typedef boost::mutex                  mutex_type;
-  typedef boost::lock_guard<mutex_type> lock_guard;
+  typedef boost::mutex                   mutex_type;
+  typedef boost::lock_guard<mutex_type>  lock_guard;
+  typedef boost::unique_lock<mutex_type> unique_lock;
   typedef detail::intrusive_list<console_signal_service_base> subscriber_list;
 
   static system_service_ptr get_nullable_instance();
   static BOOL WINAPI windows_ctrl_handler(DWORD);
   bool deliver_signal();
   
-  instance_guard_type singleton_instance_guard_;
-  mutex_type          subscribers_mutex_;
-  subscriber_list     subscribers_;
+  instance_guard_type      singleton_instance_guard_;
+  mutex_type               subscribers_mutex_;  
+  subscriber_list          subscribers_;
+  bool                     notification_in_progress_;
+  subscriber_list::pointer next_notifying_subscriber_;
 }; // class console_signal_service_base::system_service
 
 struct console_signal_service_base::system_service::factory
@@ -112,20 +116,30 @@ console_signal_service_base::system_service::get_nullable_instance()
 void console_signal_service_base::system_service::add_subscriber(
     console_signal_service_base& subscriber)
 {
-  lock_guard services_guard(subscribers_mutex_);
+  lock_guard subscribers_guard(subscribers_mutex_);  
   subscribers_.push_back(subscriber);
+  if (notification_in_progress_ && !next_notifying_subscriber_)
+  {
+    next_notifying_subscriber_ = boost::addressof(subscriber);
+  }
 }
 
 void console_signal_service_base::system_service::remove_subscriber(
     console_signal_service_base& subscriber)
 {
-  lock_guard services_guard(subscribers_mutex_);
+  lock_guard subscribers_guard(subscribers_mutex_);
+  if (notification_in_progress_ && 
+      boost::addressof(subscriber) == next_notifying_subscriber_)
+  {
+    next_notifying_subscriber_ = subscribers_.next(subscriber);
+  }
   subscribers_.erase(subscriber);
 }
 
 console_signal_service_base::system_service::system_service(
     const instance_guard_type& singleton_instance_guard)
   : singleton_instance_guard_(singleton_instance_guard)
+  , notification_in_progress_(false)
 {
   if (!::SetConsoleCtrlHandler(&this_type::windows_ctrl_handler, TRUE))
   {
@@ -164,13 +178,22 @@ BOOL WINAPI console_signal_service_base::system_service::windows_ctrl_handler(
 
 bool console_signal_service_base::system_service::deliver_signal()
 {
-  bool handled = false;
-  lock_guard services_guard(subscribers_mutex_);
-  for (console_signal_service_base* subscriber = subscribers_.front(); 
-      subscriber; subscriber = subscribers_.next(*subscriber))
+  unique_lock subscribers_lock(subscribers_mutex_);
+  if (notification_in_progress_)
   {
-    handled |= subscriber->deliver_signal();
+    return false;
   }
+  notification_in_progress_ = true;
+  bool handled = false;
+  for (subscriber_list::pointer subscriber = subscribers_.front(); subscriber;
+      subscriber = next_notifying_subscriber_)
+  {
+    next_notifying_subscriber_ = subscribers_.next(*subscriber);
+    subscribers_lock.unlock();
+    handled |= subscriber->deliver_signal();
+    subscribers_lock.lock();
+  }
+  notification_in_progress_ = false;
   return handled;
 }
 
@@ -386,7 +409,7 @@ bool console_signal_service::deliver_signal()
     }
     if (handlers->value.empty())
     {
-      if ((std::numeric_limits<queued_signals_counter>::max)() 
+      if ((std::numeric_limits<queued_signals_counter>::max)()
           != queued_signals_)
       {
         ++queued_signals_;
