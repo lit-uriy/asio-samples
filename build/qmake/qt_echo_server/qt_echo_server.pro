@@ -87,6 +87,7 @@ RC_FILE   = ../../../src/qt_echo_server/qt_echo_server.rc
 INCLUDEPATH += $${BOOST_INCLUDE} \
                ../../../include
 
+
 LIBS       += -L$${BOOST_LIB}
 win32:LIBS += -lkernel32 \
               -luser32 \
@@ -100,7 +101,26 @@ win32:LIBS += -lkernel32 \
               -lws2_32 \
               -limm32 \
               -lwinmm \
-              -lwinspool
+              -lwinspool \
+              -lwsock32
+
+#BOOST
+BOOST_LIBS += boost_system \
+              boost_thread \
+              boost_date_time
+
+BOOST_LIBS += boost_chrono
+
+for(a, BOOST_LIBS){
+    message(I see LIB $${a})
+    CONFIG (debug, debug|release) {
+        LIBS += -l$${a}-mt-d
+    }else{
+        LIBS += -l$${a}-mt
+    }
+}
+
+
 unix:LIBS  += $${BOOST_LIB}/libboost_system.a \
               $${BOOST_LIB}/libboost_thread.a \
               $${BOOST_LIB}/libboost_date_time.a
